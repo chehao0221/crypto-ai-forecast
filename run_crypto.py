@@ -49,11 +49,62 @@ def get_top_volume_pool():
                 tickers.extend(tables[0]['Symbol'].dropna().astype(str).tolist())
         except: pass
 
-    # 策略 C: 強制保底名單 (確保絕對有東西可以海選)
+# 策略 C: 強制保底名單 (擴展至 300 檔，涵蓋全市場熱門標的)
     backup_list = [
-        "ADA-USD", "DOGE-USD", "DOT-USD", "MATIC-USD", "LINK-USD", "AVAX-USD", 
-        "SHIB-USD", "TRX-USD", "LTC-USD", "BCH-USD", "UNI-USD", "NEAR-USD", 
-        "FIL-USD", "APT-USD", "ARB-USD", "OP-USD", "STX-USD", "RNDR-USD"
+        # --- 前 50 大主流與基礎設施 ---
+        "ADA-USD", "DOGE-USD", "DOT-USD", "MATIC-USD", "LINK-USD", "AVAX-USD", "SHIB-USD", "TRX-USD",
+        "LTC-USD", "BCH-USD", "UNI-USD", "NEAR-USD", "FIL-USD", "APT-USD", "ARB-USD", "OP-USD",
+        "STX-USD", "ICP-USD", "ETC-USD", "HBAR-USD", "KAS-USD", "INJ-USD", "TIA-USD", "SUI-USD",
+        "SEI-USD", "ATOM-USD", "IMX-USD", "VET-USD", "EGLD-USD", "ALGO-USD", "FTM-USD", "FLOW-USD",
+        "MNT-USD", "ASTR-USD", "METIS-USD", "SKL-USD", "STRK-USD", "MANTA-USD", "ZK-USD", "AVAX-USD",
+        "RENDER-USD", "HNT-USD", "KAVA-USD", "AXL-USD", "MINA-USD", "RON-USD", "DYM-USD", "PYTH-USD",
+        
+        # --- AI 賽道與預言機 ---
+        "FET-USD", "TAO-USD", "AKT-USD", "THETA-USD", "GRT-USD", "AGIX-USD", "OCEAN-USD", "ARKM-USD",
+        "NOS-USD", "GLM-USD", "PRIME-USD", "AIOZ-USD", "GPT-USD", "PHB-USD", "RSS3-USD", "TRAC-USD",
+        "RLC-USD", "NMR-USD", "BAND-USD", "API3-USD", "LINK-USD", "UMA-USD", "TRB-USD", "ORAI-USD",
+        
+        # --- Meme 幣 (高波動、海選常客) ---
+        "PEPE-USD", "WIF-USD", "FLOKI-USD", "BONK-USD", "MEME-USD", "BOME-USD", "TURBO-USD", "MYRO-USD",
+        "WEN-USD", "MOG-USD", "POPCAT-USD", "BRETT-USD", "DEGEN-USD", "SLERF-USD", "MEW-USD", "MANEKI-USD",
+        "ELON-USD", "BABYDOGE-USD", "VINU-USD", "COQ-USD", "TOSHI-USD", "LADYS-USD", "AIDOGE-USD", "PEOPLE-USD",
+        
+        # --- DeFi, DEX 與質押 ---
+        "AAVE-USD", "MKR-USD", "LDO-USD", "CRV-USD", "SNX-USD", "JUP-USD", "PENDLE-USD", "DYDX-USD",
+        "COMP-USD", "RUNE-USD", "CAKE-USD", "ENA-USD", "ETHFI-USD", "RAY-USD", "COW-USD", "BAL-USD",
+        "SUSHI-USD", "JOE-USD", "ORCA-USD", "GMX-USD", "ID-USD", "ENS-USD", "RPL-USD", "SSV-USD",
+        "LQTY-USD", "ANKR-USD", "ZRX-USD", "1INCH-USD", "KNC-USD", "BICO-USD", "CVX-USD", "FXS-USD",
+        
+        # --- GameFi, Metaverse 與 NFT ---
+        "SAND-USD", "MANA-USD", "AXS-USD", "GALA-USD", "ENJ-USD", "BEAM-USD", "PIXEL-USD", "ILV-USD",
+        "YGG-USD", "MAGIC-USD", "BIGTIME-USD", "APE-USD", "ALICE-USD", "WAXP-USD", "GMT-USD", "SUPER-USD",
+        "MBOX-USD", "XAI-USD", "PORTAL-USD", "ACE-USD", "GHST-USD", "CHR-USD", "UOS-USD", "NAKA-USD",
+        
+        # --- Layer 1 / Layer 2 擴展 ---
+        "METIS-USD", "LOOM-USD", "EVMOS-USD", "CANTO-USD", "KTS-USD", "GLMR-USD", "MOVR-USD", "ROSE-USD",
+        "IOTX-USD", "ONT-USD", "NEO-USD", "QTUM-USD", "GAS-USD", "ZIL-USD", "ONE-USD", "CELO-USD",
+        "KSM-USD", "SCRT-USD", "ZEN-USD", "ICX-USD", "LSK-USD", "WAVES-USD", "RVN-USD", "CORE-USD",
+        
+        # --- 存儲、隱私與計算 ---
+        "AR-USD", "STORJ-USD", "SC-USD", "BLZ-USD", "XMR-USD", "ZEC-USD", "DASH-USD", "DCR-USD",
+        "BEAM-USD", "BEL-USD", "PHA-USD", "CTSI-USD", "CVC-USD", "STPT-USD", "UTK-USD", "POND-USD",
+        
+        # --- 銘文與比特幣生態 ---
+        "ORDI-USD", "SATS-USD", "RATS-USD", "MUBI-USD", "STX-USD", "ALEX-USD", "RIF-USD", "BADGER-USD",
+        "CKB-USD", "LEVER-USD", "AUCTION-USD", "BAKE-USD", "T-USD", "REN-USD", "WBTC-USD",
+        
+        # --- 其他熱門與潛力標的 ---
+        "CHZ-USD", "IOTA-USD", "XLM-USD", "XEC-USD", "WOO-USD", "JASMY-USD", "BTT-USD", "HOT-USD",
+        "ZIG-USD", "TEL-USD", "CSPR-USD", "TWT-USD", "RVN-USD", "LRC-USD", "KDA-USD", "SYS-USD",
+        "NKN-USD", "DGB-USD", "XVG-USD", "STEEM-USD", "SXP-USD", "ARK-USD", "SCR-USD", "GNS-USD",
+        "POLY-USD", "LIT-USD", "MASK-USD", "LPT-USD", "TRB-USD", "GTC-USD", "NMR-USD", "OXT-USD",
+        "RNDR-USD", "HIGH-USD", "PROMS-USD", "HOOK-USD", "EDU-USD", "ID-USD", "MAV-USD", "RDNT-USD",
+        "ARKM-USD", "CYBER-USD", "WLD-USD", "IQ-USD", "OAX-USD", "MDT-USD", "NFP-USD", "AI-USD",
+        "XVS-USD", "FORTH-USD", "OOKI-USD", "VGX-USD", "PROM-USD", "VTHO-USD", "DENT-USD", "FUN-USD",
+        "STMX-USD", "STRAX-USD", "DATA-USD", "NULS-USD", "MTL-USD", "PNT-USD", "QLC-USD", "POWR-USD",
+        "AMB-USD", "KMD-USD", "ARK-USD", "ADX-USD", "GAS-USD", "VIB-USD", "REQ-USD", "RDN-USD",
+        "GTO-USD", "OST-USD", "LUN-USD", "MTH-USD", "WPR-USD", "SNM-USD", "NCASH-USD", "TNB-USD",
+        "VIC-USD", "LOOM-USD", "KEY-USD", "PIVX-USD", "CLV-USD", "BAKE-USD", "REI-USD", "TKO-USD"
     ]
     
     exclude = ["USDT-USD", "USDC-USD", "DAI-USD", "FDUSD-USD", "PYUSD-USD"]
