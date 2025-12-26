@@ -4,3 +4,5 @@ numpy
 requests
 xgboost
 scikit-learn
+lxml
+html5lib
