@@ -26,45 +26,36 @@ def get_top_volume_pool():
     try:
         headers = {'User-agent': 'Mozilla/5.0'}
         tickers = []
-        # 抓取前 3 頁 (每頁 100 筆)
         for offset in [0, 100, 200]:
             url = f"https://finance.yahoo.com/crypto/?count=100&offset={offset}"
             resp = requests.get(url, headers=headers, timeout=15)
             tables = pd.read_html(resp.text)
-            if not tables:
-                continue
+            if not tables: continue
             
             df = tables[0]
             if 'Symbol' in df.columns:
-                # 強制轉換為字串並移除空值，解決 TypeError 報錯
                 raw_symbols = df['Symbol'].dropna().astype(str).tolist()
                 tickers.extend(raw_symbols)
         
-        # 排除穩定幣與格式錯誤的標的
         exclude = ["USDT-USD", "USDC-USD", "DAI-USD", "FDUSD-USD", "PYUSD-USD", "USDE-USD"]
         clean_tickers = [t for t in tickers if isinstance(t, str) and t.endswith("-USD") and t not in exclude]
-        
-        # 移除重複項
         clean_tickers = list(dict.fromkeys(clean_tickers))
-        return clean_tickers if len(clean_tickers) > 0 else MAIN_5
+        return clean_tickers
     except Exception as e:
         print(f"⚠️ 抓取海選清單失敗: {e}")
-        return MAIN_5 + ["ADA-USD", "DOGE-USD", "LINK-USD", "AVAX-USD", "DOT-USD"]
+        return MAIN_5
 
 def calc_pivot(df):
-    """計算支撐與壓力位 (Pivot Points)"""
+    """計算支撐與壓力位"""
     r = df.iloc[-20:]
     h, l, c = r["High"].max(), r["Low"].min(), r["Close"].iloc[-1]
     p = (h + l + c) / 3
-    # 針對低價幣與高價幣調整顯示精度
     prec = 4 if c < 10 else 2
     return round(2*p - h, prec), round(2*p - l, prec)
 
 def get_settle_report():
     """5 日回測結算邏輯"""
-    if not os.path.exists(HISTORY_FILE):
-        return ""
-    
+    if not os.path.exists(HISTORY_FILE): return ""
     try:
         df = pd.read_csv(HISTORY_FILE)
         if "settled" not in df.columns or df[df["settled"] == False].empty:
@@ -74,30 +65,22 @@ def get_settle_report():
         report = "\n🏁 **加密貨幣 5 日回測結算報告**\n"
         for idx, row in unsettled.iterrows():
             try:
-                # 下載當前價格進行比對
                 p_df = yf.download(row["symbol"], period="7d", auto_adjust=True, progress=False)
                 if p_df.empty: continue
-                
                 exit_p = p_df["Close"].iloc[-1]
                 ret = (exit_p - row["entry_price"]) / row["entry_price"]
-                # 判斷預測方向是否正確
                 win = (ret > 0 and row["pred_ret"] > 0) or (ret < 0 and row["pred_ret"] < 0)
-                
                 report += f"• `{row['symbol']}` 預估 {row['pred_ret']:+.2%} | 實際 `{ret:+.2%}` {'✅' if win else '❌'}\n"
                 df.at[idx, "settled"] = True
-            except:
-                continue
-        
+            except: continue
         df.to_csv(HISTORY_FILE, index=False)
         return report
-    except:
-        return ""
+    except: return ""
 
 # =========================
 # 主程式：AI 分析引擎
 # =========================
 def run():
-    # 1. 準備掃描清單 (海選池 300 + 固定監控 5)
     vol_pool = get_top_volume_pool()
     full_scan = list(set(MAIN_5 + vol_pool))
     
@@ -112,80 +95,73 @@ def run():
             df = data[s].dropna()
             if len(df) < 100: continue
             
-            # 特徵工程
             df["mom20"] = df["Close"].pct_change(20)
             df["bias"] = (df["Close"] - df["Close"].rolling(20).mean()) / df["Close"].rolling(20).mean()
             df["vol_ratio"] = df["Volume"] / df["Volume"].rolling(20).mean()
             df["target"] = df["Close"].shift(-5) / df["Close"] - 1
             
-            # 訓練模型 (XGBoost)
             train = df.iloc[:-5].dropna()
             if len(train) < 50: continue
             
             model = XGBRegressor(n_estimators=100, max_depth=3, learning_rate=0.05, random_state=42)
             model.fit(train[feats], train["target"])
             
-            # 獲取預測與支撐壓力
             pred = float(model.predict(df[feats].iloc[-1:])[0])
             sup, res = calc_pivot(df)
             
-            results[s] = {
-                "pred": pred, 
-                "price": df["Close"].iloc[-1], 
-                "sup": sup, 
-                "res": res
-            }
-        except:
-            continue
+            results[s] = {"pred": pred, "price": df["Close"].iloc[-1], "sup": sup, "res": res}
+        except: continue
 
-    # 2. 生成 Discord 報告
+    # =========================
+    # 生成報告 (格式修正)
+    # =========================
     msg = f"₿ **加密貨幣 AI 進階預測報告 ({datetime.now():%Y-%m-%d})**\n"
     msg += "------------------------------------------\n\n"
 
-    # AI 海選 Top 5 (從交易量前 300 選出，不包含固定監控標的)
+    # 海選邏輯：移除 pred > 0 的限制，保證選出相對最強的 5 名
     medals = ["🥇", "🥈", "🥉", "📈", "📈"]
-    candidates = {k: v for k, v in results.items() if k not in MAIN_5 and v["pred"] > 0}
-    top_5 = sorted(candidates.items(), key=lambda x: x[1]["pred"], reverse=True)[:5]
+    candidates = {k: v for k, v in results.items() if k not in MAIN_5}
+    
+    if not candidates:
+        msg += "⚠️ AI 海選區塊：今日掃描數據不足，暫無海選結果。\n\n"
+        top_5_list = []
+    else:
+        top_5_list = sorted(candidates.items(), key=lambda x: x[1]["pred"], reverse=True)[:5]
+        msg += "🏆 **AI 海選 Top 5 (高交易量潛力幣)**\n"
+        for i, (s, r) in enumerate(top_5_list):
+            msg += f"{medals[i]} {s}: 預估 `{r['pred']:+.2%}`\n"
+            msg += f" └ 現價: `{r['price']:.4f}` (支撐: `{r['sup']}` / 壓力: `{r['res']}`)\n"
+        msg += "\n"
 
-    msg += "🏆 **AI 海選 Top 5 (高交易量潛力幣)**\n"
-    for i, (s, r) in enumerate(top_5):
-        msg += f"{medals[i]} {s}: 預估 `{r['pred']:+.2%}`\n"
-        msg += f" └ 現價: `{r['price']:.4f}` (支撐: `{r['sup']}` / 壓力: `{r['res']}`)\n"
-
-    # 固定監控區塊 (主流幣)
-    msg += "\n💎 **主流幣監控 (固定顯示)**\n"
+    # 固定監控區塊
+    msg += "💎 **主流幣監控 (固定顯示)**\n"
     for s in MAIN_5:
         if s in results:
             r = results[s]
             msg += f"{s}: 預估 `{r['pred']:+.2%}`\n"
             msg += f" └ 現價: `{r['price']:.4f}` (支撐: `{r['sup']}` / 壓力: `{r['res']}`)\n"
 
-    # 回測結算報告
     msg += get_settle_report()
     msg += "\n💡 AI 為機率模型，僅供研究參考。投資請謹慎。"
 
-    # 3. 發送訊息與儲存歷史
+    # 發送訊息
     if WEBHOOK_URL:
-        requests.post(WEBHOOK_URL, json={"content": msg[:1900]}, timeout=15)
+        requests.post(WEBHOOK_URL, json={"content": msg[:2000]}, timeout=15)
     else:
         print(msg)
 
-    # 存檔 (包含海選 Top 5 與固定監控幣種)
-    save_list = top_5 + [(k, results[k]) for k in MAIN_5 if k in results]
+    # 存檔供 5 日後結算
+    save_items = top_5_list + [(k, results[k]) for k in MAIN_5 if k in results]
     hist_data = [{
         "date": datetime.now().date(),
         "symbol": s,
         "entry_price": r["price"],
         "pred_ret": r["pred"],
         "settled": False
-    } for s, r in save_list]
+    } for s, r in save_items]
 
-    pd.DataFrame(hist_data).to_csv(
-        HISTORY_FILE, 
-        mode="a", 
-        header=not os.path.exists(HISTORY_FILE), 
-        index=False
-    )
+    if hist_data:
+        pd.DataFrame(hist_data).to_csv(HISTORY_FILE, mode="a", header=not os.path.exists(HISTORY_FILE), index=False)
 
 if __name__ == "__main__":
     run()
