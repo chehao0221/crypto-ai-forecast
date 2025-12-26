@@ -9,106 +9,86 @@ import warnings
 
 warnings.filterwarnings("ignore")
 
-# =========================
-# 基本設定（不動）
-# =========================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 HISTORY_FILE = os.path.join(BASE_DIR, "crypto_history.csv")
 WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
 
-# 固定監控（不動）
+# 固定主流幣（不動）
 MAIN_5 = ["BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD", "XRP-USD"]
 
-# =========================
-# 海選池抓取（原邏輯保留）
-# =========================
 def get_top_volume_pool():
-    headers = {'User-agent': 'Mozilla/5.0'}
+    headers = {"User-Agent": "Mozilla/5.0"}
     tickers = []
 
     try:
         for offset in [0, 100, 200]:
             url = f"https://finance.yahoo.com/crypto/?count=100&offset={offset}"
-            resp = requests.get(url, headers=headers, timeout=15)
-            tables = pd.read_html(resp.text, flavor='html5lib')
-            if tables and 'Symbol' in tables[0]:
-                tickers.extend(tables[0]['Symbol'].dropna().astype(str).tolist())
+            r = requests.get(url, headers=headers, timeout=15)
+            tables = pd.read_html(r.text, flavor="html5lib")
+            if tables and "Symbol" in tables[0]:
+                tickers.extend(tables[0]["Symbol"].dropna().tolist())
     except:
         pass
 
-    backup_list = [
-        "ADA-USD", "DOGE-USD", "DOT-USD", "MATIC-USD", "LINK-USD", "AVAX-USD",
-        "SHIB-USD", "TRX-USD", "LTC-USD", "BCH-USD", "UNI-USD", "NEAR-USD",
-        "FIL-USD", "APT-USD", "ARB-USD", "OP-USD", "STX-USD", "RNDR-USD"
+    backup = [
+        "ADA-USD","DOGE-USD","DOT-USD","MATIC-USD","LINK-USD","AVAX-USD",
+        "SHIB-USD","TRX-USD","LTC-USD","BCH-USD","UNI-USD","NEAR-USD",
+        "FIL-USD","APT-USD","ARB-USD","OP-USD","STX-USD","RNDR-USD"
     ]
 
-    exclude = ["USDT-USD", "USDC-USD", "DAI-USD", "FDUSD-USD", "PYUSD-USD"]
-    clean = [t for t in tickers if t.endswith("-USD") and t not in exclude]
+    exclude = ["USDT-USD","USDC-USD","DAI-USD","FDUSD-USD","PYUSD-USD"]
+    clean = [t for t in tickers if isinstance(t, str) and t.endswith("-USD") and t not in exclude]
 
-    return list(dict.fromkeys(clean + backup_list))
+    return list(dict.fromkeys(clean + backup))
 
-# =========================
-# 技術指標
-# =========================
-def calc_rsi(series, period=14):
-    delta = series.diff()
-    gain = delta.clip(lower=0).rolling(period).mean()
-    loss = -delta.clip(upper=0).rolling(period).mean()
+def calc_rsi(close, n=14):
+    diff = close.diff()
+    gain = diff.clip(lower=0).rolling(n).mean()
+    loss = -diff.clip(upper=0).rolling(n).mean()
     rs = gain / loss
-    return 100 - (100 / (1 + rs))
+    return 100 - 100 / (1 + rs)
 
 def calc_pivot(df):
     r = df.iloc[-20:]
     h, l, c = r["High"].max(), r["Low"].min(), r["Close"].iloc[-1]
     p = (h + l + c) / 3
     prec = 4 if c < 10 else 2
-    return round(2 * p - h, prec), round(2 * p - l, prec)
+    return round(2*p - h, prec), round(2*p - l, prec)
 
-# =========================
-# 回測結算（顯示不動）
-# =========================
 def get_settle_report():
     if not os.path.exists(HISTORY_FILE):
-        return ""
+        return "\n 加密貨幣 5 日回測結算報告\n"
 
     df = pd.read_csv(HISTORY_FILE)
     if "settled" not in df.columns:
-        return ""
+        return "\n 加密貨幣 5 日回測結算報告\n"
 
     unsettled = df[df["settled"] == False]
-    if unsettled.empty:
-        return "\n📊 **加密貨幣 5 日回測結算報告**：暫無待結算項目\n"
+    report = "\n 加密貨幣 5 日回測結算報告\n"
 
-    report = "\n🏁 **加密貨幣 5 日回測結算報告**\n"
-    for idx, row in unsettled.iterrows():
+    for i, row in unsettled.iterrows():
         try:
             p = yf.download(row["symbol"], period="7d", auto_adjust=True, progress=False)
             if p.empty:
                 continue
             exit_p = p["Close"].iloc[-1]
             ret = (exit_p - row["entry_price"]) / row["entry_price"]
-            win = (ret > 0 and row["pred_ret"] > 0) or (ret < 0 and row["pred_ret"] < 0)
-            report += f"• `{row['symbol']}` 預估 {row['pred_ret']:+.2%} | 實際 `{ret:+.2%}` {'✅' if win else '❌'}\n"
-            df.at[idx, "settled"] = True
+            df.at[i, "settled"] = True
         except:
             continue
 
-    # 只保留 180 天
     df["date"] = pd.to_datetime(df["date"])
     df = df[df["date"] >= datetime.now() - timedelta(days=180)]
     df.to_csv(HISTORY_FILE, index=False)
 
     return report
 
-# =========================
-# 主程式
-# =========================
 def run():
     pool = list(set(MAIN_5 + get_top_volume_pool()))
     data = yf.download(pool, period="2y", auto_adjust=True, group_by="ticker", progress=False)
 
     results = {}
-    feats = ["mom20", "bias", "vol_ratio", "rsi", "volatility"]
+    feats = ["mom20","bias","vol_ratio","rsi","volatility"]
 
     for s in pool:
         try:
@@ -148,4 +128,34 @@ def run():
         except:
             continue
 
-    msg = f"₿ **加密貨幣 AI 進階預測報**
+    msg = f"₿ 加密貨幣 AI 進階預測報告 ({datetime.now():%Y-%m-%d})\n"
+    msg += "------------------------------------------\n\n"
+
+    msg += " AI 海選 Top 5 (潛力標的)\n"
+    top5 = sorted(
+        [(k, v) for k, v in results.items() if k not in MAIN_5],
+        key=lambda x: x[1]["pred"],
+        reverse=True
+    )[:5]
+
+    for s, r in top5:
+        msg += f" {s}: 預估 {r['pred']:+.2%}\n"
+        msg += f"  └ 現價: {r['price']:.4f} (支撐: {r['sup']} / 壓力: {r['res']})\n"
+
+    msg += "\n 主流幣監控 (固定顯示)\n"
+    for s in MAIN_5:
+        if s in results:
+            r = results[s]
+            msg += f"{s}: 預估 {r['pred']:+.2%}\n"
+            msg += f" └ 現價: {r['price']:.4f} (支撐: {r['sup']} / 壓力: {r['res']})\n"
+
+    msg += get_settle_report()
+    msg += "\n AI 為機率模型，僅供研究參考。投資請謹慎。"
+
+    if WEBHOOK_URL:
+        requests.post(WEBHOOK_URL, json={"content": msg[:2000]})
+    else:
+        print(msg)
+
+if __name__ == "__main__":
+    run()
