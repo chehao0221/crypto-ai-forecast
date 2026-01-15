@@ -20,63 +20,54 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(BASE_DIR, ".cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-HISTORY_PATH = os.path.join(CACHE_DIR, "history.csv")
-SETTINGS_PATH = os.path.join(BASE_DIR, "settings.json")
+HISTORY_FILE = os.path.join(CACHE_DIR, "history.csv")
+SETTINGS_FILE = os.path.join(BASE_DIR, "settings.json")
 
 TW_TZ = ZoneInfo("Asia/Taipei")
 
-# 固定顯示主流幣（跟台股「指定清單」概念一致）
-MAIN_5 = ["BTC-USD", "ETH-USD", "BNB-USD", "SOL-USD", "XRP-USD"]
 
-# 你自己要海選的清單（可自行調整）
-UNIVERSE = [
-    "BTC-USD", "ETH-USD", "BNB-USD", "SOL-USD", "XRP-USD",
-    "ADA-USD", "DOGE-USD", "AVAX-USD", "DOT-USD", "LINK-USD",
-    "MATIC-USD", "LTC-USD", "BCH-USD", "ATOM-USD", "TRX-USD",
-    "ETC-USD", "FIL-USD", "NEAR-USD", "APT-USD", "ARB-USD",
-    "OP-USD", "SUI-USD", "INJ-USD", "AAVE-USD", "UNI-USD",
-    "FTM-USD", "PEPE-USD", "SHIB-USD"
-]
-
-FEATS = [
-    "ret_1", "ret_3", "ret_5", "ret_10",
-    "ma_5", "ma_10", "ma_20",
-    "vol_5", "vol_10", "vol_20",
-    "rsi_14",
-    "atr_14",
-]
-
-
+# -----------------------------
+# Settings / Discord
+# -----------------------------
 def _now_tw() -> datetime:
     return datetime.now(TW_TZ)
 
 
+def _today_tw() -> str:
+    return _now_tw().strftime("%Y-%m-%d")
+
+
 def _load_settings() -> Dict:
-    if not os.path.exists(SETTINGS_PATH):
+    if not os.path.exists(SETTINGS_FILE):
         return {}
     try:
-        with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
+        with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return {}
 
 
-def _post(text: str) -> None:
-    """Discord webhook post (single message)"""
+def _post(content: str) -> None:
     settings = _load_settings()
     url = settings.get("DISCORD_WEBHOOK", "") or os.getenv("DISCORD_WEBHOOK", "")
     if not url:
         print("[discord] webhook not set, skip")
+        print(content)
         return
+
     try:
-        r = requests.post(url, json={"content": text}, timeout=20)
+        r = requests.post(url, json={"content": content}, timeout=20)
         if r.status_code >= 300:
             print(f"[discord] failed: {r.status_code} {r.text[:200]}")
     except Exception as e:
         print(f"[discord] post exception: {e}")
+        print(content)
 
 
-def _ensure_history_columns(hist: pd.DataFrame) -> pd.DataFrame:
+# -----------------------------
+# History I/O
+# -----------------------------
+def _read_history() -> pd.DataFrame:
     cols = [
         "date",
         "ticker",
@@ -91,28 +82,18 @@ def _ensure_history_columns(hist: pd.DataFrame) -> pd.DataFrame:
         "status",
         "updated_at",
     ]
-    if hist is None or hist.empty:
+    if not os.path.exists(HISTORY_FILE):
         return pd.DataFrame(columns=cols)
 
+    df = pd.read_csv(HISTORY_FILE)
     for c in cols:
-        if c not in hist.columns:
-            hist[c] = pd.NA
-    return hist[cols]
+        if c not in df.columns:
+            df[c] = pd.NA
+    return df[cols]
 
 
-def _read_history() -> pd.DataFrame:
-    if not os.path.exists(HISTORY_PATH):
-        return _ensure_history_columns(pd.DataFrame())
-    try:
-        hist = pd.read_csv(HISTORY_PATH)
-        return _ensure_history_columns(hist)
-    except Exception:
-        return _ensure_history_columns(pd.DataFrame())
-
-
-def _write_history(hist: pd.DataFrame) -> None:
-    hist = _ensure_history_columns(hist)
-    hist.to_csv(HISTORY_PATH, index=False, encoding="utf-8")
+def _write_history(df: pd.DataFrame) -> None:
+    df.to_csv(HISTORY_FILE, index=False, encoding="utf-8")
 
 
 def settle_date_plus_days(date_str: str, days: int) -> str:
@@ -121,23 +102,30 @@ def settle_date_plus_days(date_str: str, days: int) -> str:
 
 
 def append_today_predictions(hist: pd.DataFrame, today: str, new_rows: List[Dict]) -> pd.DataFrame:
-    hist = _ensure_history_columns(hist)
+    now_str = _now_tw().strftime("%Y-%m-%d %H:%M:%S")
 
     df_new = pd.DataFrame(new_rows)
+    if df_new.empty:
+        return hist
+
     df_new["date"] = today
     df_new["status"] = "pending"
-    df_new["updated_at"] = _now_tw().strftime("%Y-%m-%d %H:%M:%S")
+    df_new["updated_at"] = now_str
 
     # 避免同日同 ticker 重複
     if not hist.empty:
-        keep = ~((hist["date"].astype(str) == today) & (hist["ticker"].astype(str).isin(df_new["ticker"].astype(str))))
+        keep = ~(
+            (hist["date"].astype(str) == today)
+            & (hist["ticker"].astype(str).isin(df_new["ticker"].astype(str)))
+        )
         hist = hist[keep].copy()
 
-    if hist.empty:
-        return df_new
     return pd.concat([hist, df_new], ignore_index=True)
 
 
+# -----------------------------
+# Settle history
+# -----------------------------
 def settle_history(today: str) -> Tuple[pd.DataFrame, str]:
     hist = _read_history()
     if hist.empty:
@@ -174,7 +162,7 @@ def settle_history(today: str) -> Tuple[pd.DataFrame, str]:
             continue
 
         settle_close = float(d2.loc[settle_date, "Close"])
-        # 防呆：price_at_run 可能因為過去抓價失敗而為 0/NaN，避免結算時除以 0
+        # 防呆：price_at_run 可能因過去抓價失敗而為 0/NaN，避免除以 0
         try:
             price_at_run = float(row["price_at_run"])
         except Exception:
@@ -237,87 +225,94 @@ def last20_stats_line(hist: pd.DataFrame) -> str:
         return "最近 20 筆命中率：--% / 平均報酬：--%"
 
 
-def add_features(df: pd.DataFrame) -> pd.DataFrame:
-    d = df.copy()
-    d["Close"] = d["Close"].astype(float)
-    d["ret_1"] = d["Close"].pct_change(1)
-    d["ret_3"] = d["Close"].pct_change(3)
-    d["ret_5"] = d["Close"].pct_change(5)
-    d["ret_10"] = d["Close"].pct_change(10)
-
-    d["ma_5"] = d["Close"].rolling(5).mean() / d["Close"] - 1
-    d["ma_10"] = d["Close"].rolling(10).mean() / d["Close"] - 1
-    d["ma_20"] = d["Close"].rolling(20).mean() / d["Close"] - 1
-
-    d["vol_5"] = d["Close"].pct_change().rolling(5).std()
-    d["vol_10"] = d["Close"].pct_change().rolling(10).std()
-    d["vol_20"] = d["Close"].pct_change().rolling(20).std()
-
-    # RSI(14)
-    delta = d["Close"].diff()
-    gain = delta.where(delta > 0, 0.0).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0.0)).rolling(14).mean()
-    rs = gain / (loss.replace(0, pd.NA))
-    d["rsi_14"] = 100 - (100 / (1 + rs))
-
-    # ATR(14)
-    high = d.get("High", d["Close"]).astype(float)
-    low = d.get("Low", d["Close"]).astype(float)
-    prev_close = d["Close"].shift(1)
-    tr = pd.concat([(high - low).abs(), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
-    d["atr_14"] = tr.rolling(14).mean()
-
-    return d
-
-
-def make_train(df: pd.DataFrame) -> pd.DataFrame:
-    d = df.copy()
-    d = add_features(d)
-    d["target"] = d["Close"].pct_change(1).shift(-1)
-    d = d.dropna()
-    return d
+# -----------------------------
+# Universe
+# -----------------------------
+def get_universe(today: str) -> List[str]:
+    # 你可以自行擴充/調整
+    return [
+        "BTC-USD",
+        "ETH-USD",
+        "BNB-USD",
+        "SOL-USD",
+        "XRP-USD",
+        "ADA-USD",
+        "DOGE-USD",
+        "AVAX-USD",
+        "DOT-USD",
+        "LINK-USD",
+        "MATIC-USD",
+        "LTC-USD",
+        "BCH-USD",
+        "ATOM-USD",
+        "TRX-USD",
+        "ETC-USD",
+        "FIL-USD",
+        "NEAR-USD",
+        "APT-USD",
+        "ARB-USD",
+        "OP-USD",
+        "SUI-USD",
+        "INJ-USD",
+        "AAVE-USD",
+        "UNI-USD",
+        "FTM-USD",
+        "PEPE-USD",
+        "SHIB-USD",
+    ]
 
 
 def calc_pivot(df: pd.DataFrame) -> Tuple[float, float]:
-    """用簡單 pivot（近 20 天）找支撐/壓力，跟台股一致概念"""
     d = df.copy().tail(20)
     lo = float(d["Low"].min()) if "Low" in d.columns else float(d["Close"].min())
     hi = float(d["High"].max()) if "High" in d.columns else float(d["Close"].max())
     return round(lo, 4), round(hi, 4)
 
 
+# -----------------------------
+# Main
+# -----------------------------
 def run() -> None:
-    today = _now_tw().strftime("%Y-%m-%d")
+    today = _today_tw()
 
-    # 0) 先結算已到期的歷史（不讓它卡死）
+    # 1) 先結算
     hist, settle_detail = settle_history(today)
     _write_history(hist)
+
     if settle_detail:
         _post("🧾 已結算歷史紀錄：\n" + settle_detail)
 
-    # 1) 下載資料（海選池 + MAIN_5）
-    tickers = sorted(set(UNIVERSE + MAIN_5))
-    data = safe_yf_download(tickers, period="6mo", max_chunk=60)
+    # 2) 今日預測
+    universe = get_universe(today)
+    data = safe_yf_download(universe, period="2y", max_chunk=60)
 
-    results: Dict[str, Dict] = {}
+    feats = ["mom20", "bias", "vol_ratio"]
+    results: Dict[str, dict] = {}
 
-    # 2) 逐幣訓練 + 預測
-    for s in tickers:
-        df = data.get(s)
-        if df is None or df.empty:
+    for s, df in data.items():
+        if df is None or len(df) < 160:
             continue
 
-        # 確保 index 是日期
         df = df.copy()
-        df.index = pd.to_datetime(df.index)
-
-        train = make_train(df)
-        if train.empty or len(train) < 80:
+        if "Close" not in df.columns:
             continue
 
-        feats = [c for c in FEATS if c in train.columns]
-        if len(feats) < 6:
+        # 建特徵
+        df["mom20"] = df["Close"].pct_change(20)
+        ma20 = df["Close"].rolling(20).mean()
+        df["bias"] = (df["Close"] - ma20) / ma20
+        if "Volume" in df.columns:
+            df["vol_ratio"] = df["Volume"] / df["Volume"].rolling(20).mean()
+        else:
+            df["vol_ratio"] = pd.NA
+
+        df["target"] = df["Close"].shift(-5) / df["Close"] - 1
+
+        df = df.dropna()
+        if len(df) < 120:
             continue
+
+        train = df.tail(500).copy()
 
         model = XGBRegressor(
             n_estimators=300,
@@ -384,22 +379,15 @@ def run() -> None:
 
     stats_line = last20_stats_line(hist)
 
-    # 4) Discord 顯示（跟台股一致）
+    # 4) Discord 報告
     msg = f"₿ 加密貨幣 AI 進階預測報告 ({today})\n"
     msg += "-" * 42 + "\n\n"
-
     msg += "🏆 AI 海選 Top 5 (潛力幣)\n"
+
     medals = ["🥇", "🥈", "🥉", "📈", "📈"]
     for i, (t, r) in enumerate(top):
         msg += f"{medals[i]} {t}: 預估 {r['pred']:+.2%}\n"
         msg += f" └ 現價: {r['price']} (支撐: {r['sup']} / 壓力: {r['res']})\n"
-
-    msg += "\n💎 指定主流幣監控 (固定顯示)\n"
-    for t in MAIN_5:
-        if t not in results:
-            continue
-        r = results[t]
-        msg += f"• {t}: 預估 {r['pred']:+.2%} | 現價 {r['price']}\n"
 
     msg += "\n" + stats_line
     _post(msg)
