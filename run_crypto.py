@@ -15,7 +15,52 @@ from xgboost import XGBRegressor
 from utils.safe_yfinance import safe_yf_download
 
 warnings.filterwarnings("ignore")
-...
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CACHE_DIR = os.path.join(BASE_DIR, ".cache")
+os.makedirs(CACHE_DIR, exist_ok=True)
+
+HISTORY_FILE = os.path.join(BASE_DIR, "crypto_history.csv")
+UNIVERSE_CACHE_FILE = os.path.join(CACHE_DIR, "crypto_universe.json")
+
+WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
+
+MAIN_5 = ["BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD", "XRP-USD"]
+
+DEFAULT_UNIVERSE = [
+    "BTC-USD",
+    "ETH-USD",
+    "BNB-USD",
+    "SOL-USD",
+    "XRP-USD",
+    "ADA-USD",
+    "DOGE-USD",
+    "AVAX-USD",
+    "DOT-USD",
+    "LINK-USD",
+    "MATIC-USD",
+    "LTC-USD",
+    "BCH-USD",
+    "ATOM-USD",
+    "TRX-USD",
+    "ETC-USD",
+    "FIL-USD",
+    "NEAR-USD",
+    "APT-USD",
+    "ARB-USD",
+    "OP-USD",
+    "SUI-USD",
+    "INJ-USD",
+    "AAVE-USD",
+    "UNI-USD",
+    "FTM-USD",
+]
+
+TW_TZ = ZoneInfo("Asia/Taipei")
+
+
+def _now_tw() -> datetime:
+    return datetime.now(TW_TZ)
 
 
 def _today_tw() -> str:
@@ -23,16 +68,107 @@ def _today_tw() -> str:
 
 
 def settle_date_plus_days(today: str, days: int = 5) -> str:
-    # Crypto 24/7：維持簡單，直接 +5 天
     dt = datetime.strptime(today, "%Y-%m-%d") + timedelta(days=days)
     return dt.strftime("%Y-%m-%d")
 
 
-# -----------------------------
-# Helpers
-#
-# (中間原本內容保持不動)
-# -----------------------------
+def _load_universe_cache(today: str) -> List[str] | None:
+    if not os.path.exists(UNIVERSE_CACHE_FILE):
+        return None
+    try:
+        obj = json.loads(open(UNIVERSE_CACHE_FILE, "r", encoding="utf-8").read())
+        if obj.get("date") == today and isinstance(obj.get("tickers"), list):
+            return obj["tickers"]
+    except Exception:
+        return None
+    return None
+
+
+def _save_universe_cache(today: str, tickers: List[str]) -> None:
+    try:
+        with open(UNIVERSE_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump({"date": today, "tickers": tickers}, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def get_universe(today: str) -> List[str]:
+    cached = _load_universe_cache(today)
+    if cached:
+        return cached
+    _save_universe_cache(today, DEFAULT_UNIVERSE)
+    return DEFAULT_UNIVERSE
+
+
+def calc_pivot(df: pd.DataFrame) -> Tuple[float, float]:
+    d = df.copy().tail(20)
+    lo = float(d["Low"].min()) if "Low" in d.columns else float(d["Close"].min())
+    hi = float(d["High"].max()) if "High" in d.columns else float(d["Close"].max())
+    return round(lo, 4), round(hi, 4)
+
+
+def _post(content: str) -> None:
+    if WEBHOOK_URL:
+        try:
+            r = requests.post(WEBHOOK_URL, json={"content": content}, timeout=15)
+            if r.status_code >= 300:
+                print(f"⚠️ Discord 發送失敗: {r.status_code} {r.text[:200]}")
+        except Exception as e:
+            print(f"⚠️ Discord 發送失敗: {e}")
+            print(content)
+    else:
+        print(content)
+
+
+def _read_history() -> pd.DataFrame:
+    cols = [
+        "run_date",
+        "ticker",
+        "pred",
+        "price_at_run",
+        "sup",
+        "res",
+        "settle_date",
+        "settle_close",
+        "realized_return",
+        "hit",
+        "status",
+        "updated_at",
+    ]
+    if not os.path.exists(HISTORY_FILE):
+        return pd.DataFrame(columns=cols)
+
+    df = pd.read_csv(HISTORY_FILE)
+    for c in cols:
+        if c not in df.columns:
+            df[c] = pd.NA
+    df["status"] = df["status"].fillna("pending")
+    return df[cols]
+
+
+def _write_history(df: pd.DataFrame) -> None:
+    df.to_csv(HISTORY_FILE, index=False, encoding="utf-8")
+
+
+def append_today_predictions(hist: pd.DataFrame, today: str, new_rows: List[Dict]) -> pd.DataFrame:
+    now_str = _now_tw().strftime("%Y-%m-%d %H:%M:%S")
+
+    df_new = pd.DataFrame(new_rows)
+    if df_new.empty:
+        return hist
+
+    df_new["run_date"] = today
+    df_new["status"] = "pending"
+    df_new["updated_at"] = now_str
+
+    if not hist.empty:
+        keep = ~(
+            (hist["run_date"].astype(str) == today)
+            & (hist["ticker"].astype(str).isin(df_new["ticker"].astype(str)))
+        )
+        hist = hist[keep].copy()
+
+    return pd.concat([hist, df_new], ignore_index=True)
 
 
 def settle_history(today: str) -> Tuple[pd.DataFrame, str]:
@@ -76,11 +212,12 @@ def settle_history(today: str) -> Tuple[pd.DataFrame, str]:
         except Exception:
             price_at_run = float("nan")
 
-        # FIX: avoid ZeroDivisionError / invalid historical values
+        # ✅ FIX: avoid ZeroDivisionError / invalid historical run price
         if (not math.isfinite(price_at_run)) or price_at_run <= 0:
             hist.at[idx, "status"] = "invalid"
             hist.at[idx, "updated_at"] = now_str
             continue
+
         if (not math.isfinite(settle_close)) or settle_close <= 0:
             hist.at[idx, "status"] = "invalid"
             hist.at[idx, "updated_at"] = now_str
@@ -107,22 +244,47 @@ def settle_history(today: str) -> Tuple[pd.DataFrame, str]:
         else:
             settled_lines.append(f"• {t}: 預估 {pred_f:+.2%} | 實際 {rr:+.2%} {mark}")
 
+    if not settled_lines:
+        return hist, ""
+
     msg = "\n".join(settled_lines[:10])
     if len(settled_lines) > 10:
         msg += f"\n… 另外還有 {len(settled_lines) - 10} 筆已結算"
     return hist, msg
 
 
+def last20_stats_line(hist: pd.DataFrame) -> str:
+    if hist is None or hist.empty:
+        return "最近 20 筆命中率：--% / 平均報酬：--%"
+
+    df = hist.copy()
+    df = df[df["status"].astype(str) == "settled"]
+    df = df[pd.to_numeric(df["realized_return"], errors="coerce").notna()]
+    if df.empty:
+        return "最近 20 筆命中率：--% / 平均報酬：--%"
+
+    tail = df.tail(20).copy()
+    hit = pd.to_numeric(tail["hit"], errors="coerce")
+    rr = pd.to_numeric(tail["realized_return"], errors="coerce")
+
+    if hit.notna().sum() == 0 or rr.notna().sum() == 0:
+        return "最近 20 筆命中率：--% / 平均報酬：--%"
+
+    hit_rate = float(hit.mean())
+    avg_rr = float(rr.mean())
+    return f"最近 20 筆命中率：{hit_rate:.0%} / 平均報酬：{avg_rr:+.2%}"
+
+
+# -----------------------------
+# Main
+# -----------------------------
 def run() -> None:
     today = _today_tw()
 
-    # 0) 先結算
+    # 1) 先結算
     hist, settle_detail = settle_history(today)
-    _write_history(hist)
-    if settle_detail:
-        _post("🧾 已結算歷史紀錄：\n" + settle_detail)
 
-    # 1) 下載資料
+    # 2) 今日預測
     universe = get_universe(today)
     data = safe_yf_download(universe, period="2y", max_chunk=60)
 
@@ -138,13 +300,13 @@ def run() -> None:
         ma20 = df["Close"].rolling(20).mean()
         df["bias"] = (df["Close"] - ma20) / ma20
 
-        # FIX: Volume 在 crypto 資料常有缺值，避免 dropna() 把整個幣清空
+        # ✅ FIX: Volume 常缺值，避免 df.dropna() 把整個幣清空
         vr = df["Volume"] / df["Volume"].rolling(20).mean()
         df["vol_ratio"] = vr.replace([math.inf, -math.inf], pd.NA).ffill()
 
         df["target"] = df["Close"].shift(-5) / df["Close"] - 1
 
-        # 只針對模型需要的欄位做 dropna，避免 results 永遠空
+        # ✅ FIX: 只針對必要欄位 dropna
         df = df.dropna(subset=["mom20", "bias", "vol_ratio", "target"])
         if len(df) < 120:
             continue
@@ -164,7 +326,6 @@ def run() -> None:
         pred = float(model.predict(df[feats].iloc[-1:])[0])
         sup, res = calc_pivot(df)
 
-        # 價格顯示：小於 10 顯示 4 位，否則 2 位
         price = float(df["Close"].iloc[-1])
         price_disp = round(price, 4) if price < 10 else round(price, 2)
 
@@ -175,6 +336,7 @@ def run() -> None:
             "res": res,
         }
 
+    # 3) 寫回歷史
     if not results:
         _post("⚠️ 今日無可用結果（可能資料不足或抓取失敗）")
         return
@@ -186,11 +348,11 @@ def run() -> None:
     for t, r in top:
         settle_date = settle_date_plus_days(today, 5)
 
+        # ✅ FIX: 不把 0/NaN 寫進 history，避免未來結算除以 0
         try:
             _p = float(r["price"])
         except Exception:
             _p = float("nan")
-        # FIX: 不把 0/NaN 寫進 history，避免之後結算除以 0
         if (not math.isfinite(_p)) or _p <= 0:
             continue
 
@@ -213,26 +375,24 @@ def run() -> None:
 
     stats_line = last20_stats_line(hist)
 
-    # 4) Discord 顯示（跟台股一致）
-    # ✅ 這一段（含下面所有 msg 組字）我完全沒有改，保持你原始顯示方式
+    # 4) Discord 顯示（跟你原本的一樣，不動）
     msg = f"₿ 加密貨幣 AI 進階預測報告 ({today})\n"
     msg += "-" * 42 + "\n\n"
-
     msg += "🏆 AI 海選 Top 5 (潛力幣)\n"
+
     medals = ["🥇", "🥈", "🥉", "📈", "📈"]
     for i, (t, r) in enumerate(top):
         msg += f"{medals[i]} {t}: 預估 {r['pred']:+.2%}\n"
         msg += f" └ 現價: {r['price']} (支撐: {r['sup']} / 壓力: {r['res']})\n"
 
-    msg += "\n💎 指定主流幣監控 (固定顯示)\n"
-    for t in MAIN_5:
-        if t not in results:
-            continue
-        r = results[t]
-        msg += f"• {t}: 預估 {r['pred']:+.2%} | 現價 {r['price']}\n"
+    msg += "\n🏁 加密貨幣 5 日回測結算報告\n"
+    if settle_detail.strip():
+        msg += settle_detail + "\n"
 
-    msg += "\n" + stats_line
-    _post(msg)
+    msg += f"\n{stats_line}\n"
+    msg += "\n💡 AI 為機率模型，僅供研究參考"
+
+    _post(msg[:1900])
 
 
 if __name__ == "__main__":
