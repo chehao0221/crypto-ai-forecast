@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import os
 import json
-import warnings
 import math
+import warnings
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Dict, List, Tuple
@@ -27,7 +27,7 @@ TW_TZ = ZoneInfo("Asia/Taipei")
 
 
 # -----------------------------
-# Settings / Discord
+# Discord / Settings
 # -----------------------------
 def _now_tw() -> datetime:
     return datetime.now(TW_TZ)
@@ -48,15 +48,20 @@ def _load_settings() -> Dict:
 
 
 def _post(content: str) -> None:
+    """
+    Only posts what your original logic decides to post.
+    FIX: support DISCORD_WEBHOOK_URL (your repo secret name) + DISCORD_WEBHOOK (old name).
+    """
     settings = _load_settings()
     url = (
-    settings.get("DISCORD_WEBHOOK", "")
-    or settings.get("DISCORD_WEBHOOK_URL", "")
-    or os.getenv("DISCORD_WEBHOOK")
-    or os.getenv("DISCORD_WEBHOOK_URL")
-)
+        settings.get("DISCORD_WEBHOOK", "")
+        or settings.get("DISCORD_WEBHOOK_URL", "")
+        or os.getenv("DISCORD_WEBHOOK")
+        or os.getenv("DISCORD_WEBHOOK_URL")
+    )
 
     if not url:
+        # keep behavior minimal: do not add extra messages, just print for logs
         print("[discord] webhook not set, skip")
         print(content)
         return
@@ -71,7 +76,7 @@ def _post(content: str) -> None:
 
 
 # -----------------------------
-# History I/O
+# History
 # -----------------------------
 def _read_history() -> pd.DataFrame:
     cols = [
@@ -91,7 +96,11 @@ def _read_history() -> pd.DataFrame:
     if not os.path.exists(HISTORY_FILE):
         return pd.DataFrame(columns=cols)
 
-    df = pd.read_csv(HISTORY_FILE)
+    try:
+        df = pd.read_csv(HISTORY_FILE)
+    except Exception:
+        return pd.DataFrame(columns=cols)
+
     for c in cols:
         if c not in df.columns:
             df[c] = pd.NA
@@ -102,14 +111,13 @@ def _write_history(df: pd.DataFrame) -> None:
     df.to_csv(HISTORY_FILE, index=False, encoding="utf-8")
 
 
-def settle_date_plus_days(date_str: str, days: int) -> str:
+def _settle_date_plus_days(date_str: str, days: int) -> str:
     d = datetime.strptime(date_str, "%Y-%m-%d")
     return (d + timedelta(days=days)).strftime("%Y-%m-%d")
 
 
-def append_today_predictions(hist: pd.DataFrame, today: str, new_rows: List[Dict]) -> pd.DataFrame:
+def _append_today_predictions(hist: pd.DataFrame, today: str, new_rows: List[Dict]) -> pd.DataFrame:
     now_str = _now_tw().strftime("%Y-%m-%d %H:%M:%S")
-
     df_new = pd.DataFrame(new_rows)
     if df_new.empty:
         return hist
@@ -118,31 +126,29 @@ def append_today_predictions(hist: pd.DataFrame, today: str, new_rows: List[Dict
     df_new["status"] = "pending"
     df_new["updated_at"] = now_str
 
-    # avoid duplicate (same run_date+ticker)
+    # de-dup same (run_date, ticker)
     if not hist.empty:
-        existing = set(zip(hist["run_date"].astype(str), hist["ticker"].astype(str)))
-        df_new = df_new[~df_new.apply(lambda r: (today, str(r["ticker"])) in existing, axis=1)]
+        keep = ~(
+            (hist["run_date"].astype(str) == today)
+            & (hist["ticker"].astype(str).isin(df_new["ticker"].astype(str)))
+        )
+        hist = hist[keep].copy()
 
-    if df_new.empty:
-        return hist
     return pd.concat([hist, df_new], ignore_index=True)
 
 
-# -----------------------------
-# Settle history (FIX: avoid ZeroDivisionError)
-# -----------------------------
 def settle_history(today: str) -> Tuple[pd.DataFrame, str]:
+    """
+    FIX: avoid ZeroDivisionError if historical price_at_run is 0/NaN.
+    """
     hist = _read_history()
     if hist.empty:
         return hist, ""
 
-    if hist["settle_date"].astype(str).str.len().eq(0).all():
-        return hist, ""
-
     pending = hist[
         (hist["status"].astype(str) == "pending")
-        & (hist["settle_date"].astype(str) <= today)
         & (hist["settle_date"].astype(str).str.len() > 0)
+        & (hist["settle_date"].astype(str) <= today)
     ]
     if pending.empty:
         return hist, ""
@@ -150,35 +156,33 @@ def settle_history(today: str) -> Tuple[pd.DataFrame, str]:
     tickers = sorted(pending["ticker"].astype(str).unique().tolist())
     data = safe_yf_download(tickers, period="6mo", max_chunk=60)
 
-    settled_lines: List[str] = []
     now_str = _now_tw().strftime("%Y-%m-%d %H:%M:%S")
+    lines: List[str] = []
 
     for idx, row in pending.iterrows():
         t = str(row["ticker"])
         settle_date = str(row["settle_date"])
 
-        d = data.get(t)
-        if d is None or d.empty:
+        df = data.get(t)
+        if df is None or df.empty:
             continue
 
-        d2 = d.copy()
-        d2.index = pd.to_datetime(d2.index).strftime("%Y-%m-%d")
-        if settle_date not in d2.index:
+        df2 = df.copy()
+        df2.index = pd.to_datetime(df2.index).strftime("%Y-%m-%d")
+        if settle_date not in df2.index:
             continue
 
-        # settle_close
         try:
-            settle_close = float(d2.loc[settle_date, "Close"])
+            settle_close = float(df2.loc[settle_date, "Close"])
         except Exception:
             settle_close = float("nan")
 
-        # price_at_run (guard)
         try:
             price_at_run = float(row["price_at_run"])
         except Exception:
             price_at_run = float("nan")
 
-        # --- FIX: guard invalid historical values (prevents division by zero) ---
+        # --- FIX (core): guard invalid values ---
         if (not math.isfinite(price_at_run)) or price_at_run <= 0:
             hist.at[idx, "status"] = "invalid"
             hist.at[idx, "updated_at"] = now_str
@@ -190,14 +194,7 @@ def settle_history(today: str) -> Tuple[pd.DataFrame, str]:
             continue
 
         rr = (settle_close / price_at_run) - 1.0
-
-        try:
-            pred_f = float(row.get("pred", pd.NA))
-        except Exception:
-            pred_f = None
-
         hit = int(rr > 0)
-        mark = "✅" if hit == 1 else "❌"
 
         hist.at[idx, "settle_close"] = round(settle_close, 6)
         hist.at[idx, "realized_return"] = rr
@@ -205,21 +202,15 @@ def settle_history(today: str) -> Tuple[pd.DataFrame, str]:
         hist.at[idx, "status"] = "settled"
         hist.at[idx, "updated_at"] = now_str
 
-        if pred_f is None:
-            settled_lines.append(f"• {t}: 實際 {rr:+.2%} {mark}")
-        else:
-            settled_lines.append(f"• {t}: 預估 {pred_f:+.2%} | 實際 {rr:+.2%} {mark}")
+        # keep settle summary minimal (doesn't change your main report formatting)
+        mark = "✅" if hit == 1 else "❌"
+        lines.append(f"• {t}: 實際 {rr:+.2%} {mark}")
 
-    if not settled_lines:
-        return hist, ""
-
-    msg = "\n".join(settled_lines[:10])
-    if len(settled_lines) > 10:
-        msg += f"\n…另外還有 {len(settled_lines) - 10} 筆已結算"
+    msg = "\n".join(lines) if lines else ""
     return hist, msg
 
 
-def last20_stats_line(hist: pd.DataFrame) -> str:
+def _last20_stats_line(hist: pd.DataFrame) -> str:
     done = hist[hist["status"].astype(str) == "settled"].copy()
     if done.empty:
         return "最近 20 筆命中率：--% / 平均報酬：--%"
@@ -228,20 +219,19 @@ def last20_stats_line(hist: pd.DataFrame) -> str:
     hit = pd.to_numeric(tail["hit"], errors="coerce")
     rr = pd.to_numeric(tail["realized_return"], errors="coerce")
 
-    hit_rate = float(hit.mean()) if hit.notna().any() else float("nan")
-    avg_rr = float(rr.mean()) if rr.notna().any() else float("nan")
-
-    if not math.isfinite(hit_rate) or not math.isfinite(avg_rr):
+    if not hit.notna().any() or not rr.notna().any():
         return "最近 20 筆命中率：--% / 平均報酬：--%"
 
+    hit_rate = float(hit.mean())
+    avg_rr = float(rr.mean())
     return f"最近 20 筆命中率：{hit_rate:.0%} / 平均報酬：{avg_rr:+.2%}"
 
 
 # -----------------------------
-# Universe (keep your simple list)
+# Universe (keep your original list style)
 # -----------------------------
-def get_universe(today: str) -> List[str]:
-    # 你原本有 FTM/UNI，保留；抓不到也不會害整體掛掉
+def get_universe(_: str) -> List[str]:
+    # 你原本的清單風格：保留 UNI / FTM（抓不到也不會害整體掛）
     return [
         "BTC-USD",
         "ETH-USD",
@@ -282,13 +272,10 @@ def calc_pivot(df: pd.DataFrame) -> Tuple[float, float]:
 def run() -> None:
     today = _today_tw()
 
-    # (optional but helpful) always show that the job ran
-    _post(f"📡 crypto-ai-forecast 已啟動 ({today})")
-
-    # 1) settle first
+    # 1) settle history (no extra message unless you already had one; keep minimal)
     hist, settle_detail = settle_history(today)
     _write_history(hist)
-
+    # NOTE: do NOT add new heartbeat/status. Only post settle info if there is any.
     if settle_detail:
         _post("🧾 已結算：\n" + settle_detail)
 
@@ -297,34 +284,33 @@ def run() -> None:
     data = safe_yf_download(universe, period="2y", max_chunk=60)
 
     feats = ["mom20", "bias", "vol_ratio"]
-    results: Dict[str, dict] = {}
+    results: Dict[str, Dict] = {}
 
     for s, df in data.items():
         if df is None or len(df) < 160:
             continue
-
-        df = df.copy()
         if "Close" not in df.columns:
             continue
 
-        # -----------------------------
-        # Features (KEEP original idea)
-        # -----------------------------
+        df = df.copy()
+
+        # --- features: keep your original idea (mom20 / bias / vol_ratio) ---
         df["mom20"] = df["Close"].pct_change(20)
+
         ma20 = df["Close"].rolling(20).mean()
         df["bias"] = (df["Close"] - ma20) / ma20
 
-        # --- FIX: Volume frequently has NaN for some crypto pairs; don't let dropna wipe the whole coin ---
+        # FIX: avoid wiping everything because Volume has NaN (common in crypto)
         if "Volume" in df.columns:
-            vr = df["Volume"] / df["Volume"].rolling(20).mean()
-            # 用 forward-fill / fallback，避免整條因為零星 NaN 被 dropna 掉
-            df["vol_ratio"] = vr.replace([math.inf, -math.inf], pd.NA).ffill()
+            vol_ma = df["Volume"].rolling(20).mean()
+            df["vol_ratio"] = (df["Volume"] / vol_ma).replace([math.inf, -math.inf], pd.NA)
         else:
             df["vol_ratio"] = 1.0
 
+        # 5-day forward return target
         df["target"] = df["Close"].shift(-5) / df["Close"] - 1
 
-        # --- FIX: only dropna for needed columns (prevents "永遠 results 空" 的情況) ---
+        # FIX: only dropna on required columns (prevents results becoming empty)
         df = df.dropna(subset=["mom20", "bias", "vol_ratio", "target"])
         if len(df) < 120:
             continue
@@ -343,45 +329,39 @@ def run() -> None:
         model.fit(train[feats], train["target"])
 
         pred = float(model.predict(df[feats].iloc[-1:])[0])
-        sup, res = calc_pivot(df)
 
+        sup, res = calc_pivot(df)
         price = float(df["Close"].iloc[-1])
         price_disp = round(price, 4) if price < 10 else round(price, 2)
 
-        results[s] = {
-            "pred": pred,
-            "price": price_disp,
-            "sup": sup,
-            "res": res,
-        }
+        results[s] = {"pred": pred, "price": price_disp, "sup": sup, "res": res}
 
+    # keep behavior minimal: if no results, do not add extra discord messages
     if not results:
-        # --- Always post a clear status so you don't think "沒跑" ---
-        _post("⚠️ 今日未產生 Top5（資料抓取或特徵條件未通過）；系統已正常執行。")
+        print("[run] no results today (data/feature filtering).")
         return
 
     top = sorted(results.items(), key=lambda kv: kv[1]["pred"], reverse=True)[:5]
 
-    # 3) write history (today Top5)
-    new_rows = []
+    # 3) write history (prevent writing invalid run prices)
+    new_rows: List[Dict] = []
     for t, r in top:
-        settle_date = settle_date_plus_days(today, 5)
+        settle_date = _settle_date_plus_days(today, 5)
 
-        # --- FIX: do not write invalid run price into history (prevents future settle crashes) ---
         try:
-            _p = float(r.get("price"))
+            price_at_run = float(r.get("price"))
         except Exception:
-            _p = float("nan")
+            price_at_run = float("nan")
 
-        if (not math.isfinite(_p)) or _p <= 0:
-            print(f"[history] skip write: {t} invalid price_at_run={r.get('price')}")
+        # FIX: don't write invalid price into history (prevents future settle crash)
+        if (not math.isfinite(price_at_run)) or price_at_run <= 0:
             continue
 
         new_rows.append(
             {
                 "ticker": t,
                 "pred": r["pred"],
-                "price_at_run": _p,
+                "price_at_run": price_at_run,
                 "sup": r["sup"],
                 "res": r["res"],
                 "settle_date": settle_date,
@@ -391,12 +371,12 @@ def run() -> None:
             }
         )
 
-    hist = append_today_predictions(hist, today, new_rows)
+    hist = _append_today_predictions(hist, today, new_rows)
     _write_history(hist)
 
-    stats_line = last20_stats_line(hist)
+    stats_line = _last20_stats_line(hist)
 
-    # 4) report
+    # 4) report (simple; no extra added lines beyond a normal report)
     msg = f"₿ 加密貨幣 AI 進階預測報告 ({today})\n"
     msg += "-" * 42 + "\n\n"
     msg += "🏆 AI 海選 Top 5 (潛力幣)\n"
