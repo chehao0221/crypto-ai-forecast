@@ -49,7 +49,13 @@ def _load_settings() -> Dict:
 
 def _post(content: str) -> None:
     settings = _load_settings()
-    url = settings.get("DISCORD_WEBHOOK", "") or os.getenv("DISCORD_WEBHOOK", "")
+    url = (
+    settings.get("DISCORD_WEBHOOK", "")
+    or settings.get("DISCORD_WEBHOOK_URL", "")
+    or os.getenv("DISCORD_WEBHOOK")
+    or os.getenv("DISCORD_WEBHOOK_URL")
+)
+
     if not url:
         print("[discord] webhook not set, skip")
         print(content)
