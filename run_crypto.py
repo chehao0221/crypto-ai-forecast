@@ -23,7 +23,6 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 HISTORY_FILE = os.path.join(CACHE_DIR, "history.csv")
 SETTINGS_FILE = os.path.join(BASE_DIR, "settings.json")
 
-UNIVERSE_CACHE_FILE = os.path.join(CACHE_DIR, "universe_cache.json")
 TW_TZ = ZoneInfo("Asia/Taipei")
 
 
@@ -123,6 +122,9 @@ def append_today_predictions(hist: pd.DataFrame, today: str, new_rows: List[Dict
     return pd.concat([hist, df_new], ignore_index=True)
 
 
+# -----------------------------
+# Settle history (FIX: avoid ZeroDivisionError)
+# -----------------------------
 def settle_history(today: str) -> Tuple[pd.DataFrame, str]:
     hist = _read_history()
     if hist.empty:
@@ -158,30 +160,27 @@ def settle_history(today: str) -> Tuple[pd.DataFrame, str]:
         if settle_date not in d2.index:
             continue
 
-        settle_close = float(d2.loc[settle_date, "Close"])
-        # guard: avoid division by zero / invalid historical run price
+        # settle_close
+        try:
+            settle_close = float(d2.loc[settle_date, "Close"])
+        except Exception:
+            settle_close = float("nan")
+
+        # price_at_run (guard)
         try:
             price_at_run = float(row["price_at_run"])
         except Exception:
             price_at_run = float("nan")
 
+        # --- FIX: guard invalid historical values (prevents division by zero) ---
         if (not math.isfinite(price_at_run)) or price_at_run <= 0:
-            # mark invalid so it won't keep crashing in future runs
-            try:
-                hist.at[idx, "status"] = "invalid"
-                if "updated_at" in hist.columns:
-                    hist.at[idx, "updated_at"] = now_str
-            except Exception:
-                pass
+            hist.at[idx, "status"] = "invalid"
+            hist.at[idx, "updated_at"] = now_str
             continue
 
         if (not math.isfinite(settle_close)) or settle_close <= 0:
-            try:
-                hist.at[idx, "status"] = "invalid"
-                if "updated_at" in hist.columns:
-                    hist.at[idx, "updated_at"] = now_str
-            except Exception:
-                pass
+            hist.at[idx, "status"] = "invalid"
+            hist.at[idx, "updated_at"] = now_str
             continue
 
         rr = (settle_close / price_at_run) - 1.0
@@ -233,37 +232,11 @@ def last20_stats_line(hist: pd.DataFrame) -> str:
 
 
 # -----------------------------
-# Universe cache (optional)
-# -----------------------------
-def _load_universe_cache(today: str) -> List[str] | None:
-    try:
-        with open(UNIVERSE_CACHE_FILE, "r", encoding="utf-8") as f:
-            obj = json.load(f)
-        if obj.get("date") == today and isinstance(obj.get("tickers"), list):
-            return obj["tickers"]
-    except Exception:
-        pass
-    return None
-
-
-def _save_universe_cache(today: str, tickers: List[str]) -> None:
-    try:
-        with open(UNIVERSE_CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump({"date": today, "tickers": tickers}, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
-
-
-# -----------------------------
-# Universe (keep original style)
+# Universe (keep your simple list)
 # -----------------------------
 def get_universe(today: str) -> List[str]:
-    cached = _load_universe_cache(today)
-    if cached:
-        return cached
-
-    # default list (your original)
-    tickers = [
+    # 你原本有 FTM/UNI，保留；抓不到也不會害整體掛掉
+    return [
         "BTC-USD",
         "ETH-USD",
         "BNB-USD",
@@ -291,8 +264,6 @@ def get_universe(today: str) -> List[str]:
         "UNI-USD",
         "FTM-USD",
     ]
-    _save_universe_cache(today, tickers)
-    return tickers
 
 
 def calc_pivot(df: pd.DataFrame) -> Tuple[float, float]:
@@ -304,6 +275,9 @@ def calc_pivot(df: pd.DataFrame) -> Tuple[float, float]:
 
 def run() -> None:
     today = _today_tw()
+
+    # (optional but helpful) always show that the job ran
+    _post(f"📡 crypto-ai-forecast 已啟動 ({today})")
 
     # 1) settle first
     hist, settle_detail = settle_history(today)
@@ -324,15 +298,28 @@ def run() -> None:
             continue
 
         df = df.copy()
+        if "Close" not in df.columns:
+            continue
 
-        # (keep original) feature engineering
+        # -----------------------------
+        # Features (KEEP original idea)
+        # -----------------------------
         df["mom20"] = df["Close"].pct_change(20)
         ma20 = df["Close"].rolling(20).mean()
         df["bias"] = (df["Close"] - ma20) / ma20
-        df["vol_ratio"] = df["Volume"] / df["Volume"].rolling(20).mean()
+
+        # --- FIX: Volume frequently has NaN for some crypto pairs; don't let dropna wipe the whole coin ---
+        if "Volume" in df.columns:
+            vr = df["Volume"] / df["Volume"].rolling(20).mean()
+            # 用 forward-fill / fallback，避免整條因為零星 NaN 被 dropna 掉
+            df["vol_ratio"] = vr.replace([math.inf, -math.inf], pd.NA).ffill()
+        else:
+            df["vol_ratio"] = 1.0
+
         df["target"] = df["Close"].shift(-5) / df["Close"] - 1
 
-        df = df.dropna()
+        # --- FIX: only dropna for needed columns (prevents "永遠 results 空" 的情況) ---
+        df = df.dropna(subset=["mom20", "bias", "vol_ratio", "target"])
         if len(df) < 120:
             continue
 
@@ -363,7 +350,8 @@ def run() -> None:
         }
 
     if not results:
-        _post("⚠️ 今日無可用結果（可能資料不足或抓取失敗）")
+        # --- Always post a clear status so you don't think "沒跑" ---
+        _post("⚠️ 今日未產生 Top5（資料抓取或特徵條件未通過）；系統已正常執行。")
         return
 
     top = sorted(results.items(), key=lambda kv: kv[1]["pred"], reverse=True)[:5]
@@ -373,11 +361,12 @@ def run() -> None:
     for t, r in top:
         settle_date = settle_date_plus_days(today, 5)
 
-        # guard: do not write invalid run price into history (prevents future settle crashes)
+        # --- FIX: do not write invalid run price into history (prevents future settle crashes) ---
         try:
             _p = float(r.get("price"))
         except Exception:
             _p = float("nan")
+
         if (not math.isfinite(_p)) or _p <= 0:
             print(f"[history] skip write: {t} invalid price_at_run={r.get('price')}")
             continue
@@ -386,7 +375,7 @@ def run() -> None:
             {
                 "ticker": t,
                 "pred": r["pred"],
-                "price_at_run": r["price"],
+                "price_at_run": _p,
                 "sup": r["sup"],
                 "res": r["res"],
                 "settle_date": settle_date,
