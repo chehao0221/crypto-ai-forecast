@@ -385,6 +385,15 @@ def run() -> None:
         msg += f"{medals[i]} {t}: 預估 {r['pred']:+.2%}\n"
         msg += f" └ 現價: {r['price']} (支撐: {r['sup']} / 壓力: {r['res']})\n"
 
+    # --- Fixed major coins (like TW fixed large-caps) ---
+    msg += "\n💎 主流幣監控 (固定顯示)\n"
+    for t in MAIN_5:
+        if t not in results:
+            continue
+        r = results[t]
+        msg += f"{t}: 預估 {r['pred']:+.2%}\n"
+        msg += f" └ 現價: {r['price']} (支撐: {r['sup']} / 壓力: {r['res']})\n"
+
     msg += "\n🏁 加密貨幣 5 日回測結算報告\n"
     if settle_detail.strip():
         msg += settle_detail + "\n"
