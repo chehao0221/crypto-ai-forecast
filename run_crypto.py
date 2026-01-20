@@ -56,6 +56,12 @@ DEFAULT_UNIVERSE = [
     "FTM-USD",
 ]
 
+# -----------------------------
+# 小加固參數（向台股看齊，用途：參考）
+# -----------------------------
+MIN_PRED = 0.005   # 0.5%（5 日預測報酬門檻）
+MAX_VOL20 = 0.07   # 7%（近 20 日日報酬波動上限）
+
 TW_TZ = ZoneInfo("Asia/Taipei")
 
 
@@ -326,6 +332,9 @@ def run() -> None:
         pred = float(model.predict(df[feats].iloc[-1:])[0])
         sup, res = calc_pivot(df)
 
+        # 小加固（向台股看齊）：近 20 日波動（用日報酬 std）
+        vol20 = float(df["Close"].pct_change().rolling(20).std().iloc[-1])
+
         price = float(df["Close"].iloc[-1])
         price_disp = round(price, 4) if price < 10 else round(price, 2)
 
@@ -334,6 +343,7 @@ def run() -> None:
             "price": price_disp,
             "sup": sup,
             "res": res,
+            "vol20": vol20,
         }
 
     # 3) 寫回歷史
@@ -341,7 +351,33 @@ def run() -> None:
         _post("⚠️ 今日無可用結果（可能資料不足或抓取失敗）")
         return
 
-    top = sorted(results.items(), key=lambda kv: kv[1]["pred"], reverse=True)[:5]
+    # -----------------------------
+    # 海選 Top5（小加固版，向台股看齊）
+    # 1) 先挑 pred 達門檻 + 波動不極端 的「主選」
+    # 2) 不足 5 檔用「備取」依 pred 補滿
+    # -----------------------------
+    items = list(results.items())
+
+    def _vol_ok(v: float) -> bool:
+        # vol20 可能是 nan；nan 視為未知，不擋（交給 pred 去排序）
+        try:
+            if pd.isna(v):
+                return True
+            return float(v) <= MAX_VOL20
+        except Exception:
+            return True
+
+    primary = [
+        (t, r) for (t, r) in items
+        if (float(r.get("pred", 0.0)) >= MIN_PRED) and _vol_ok(r.get("vol20", float("nan")))
+    ]
+    primary_set = set([t for (t, _) in primary])
+    backup = [(t, r) for (t, r) in items if t not in primary_set]
+
+    primary_sorted = sorted(primary, key=lambda kv: kv[1]["pred"], reverse=True)
+    backup_sorted = sorted(backup, key=lambda kv: kv[1]["pred"], reverse=True)
+
+    top = (primary_sorted + backup_sorted)[:5]
 
     # 3) 寫入 history（今日 Top5）
     new_rows = []
